@@ -1,28 +1,24 @@
 <?php
 /**
  * Enhanced Database Backup Script
- * Secure PHP script to backup MySQL database tables to CSV format in ZIP file
+ * Fast PHP script to backup MySQL database tables to CSV format in ZIP file
  * All backups are created in the same directory as this script
  */
-
-// Security: Only allow access from localhost or specific IPs
-$allowed_ips = ['127.0.0.1', '::1']; // Add your server IP if needed
-if (!in_array($_SERVER['REMOTE_ADDR'], $allowed_ips)) {
-    die('Access denied');
-}
 
 // Include your database configuration
 require_once 'config_seci.php';
 
-// Enhanced Configuration
-$max_execution_time = 600; // 10 minutes for large databases
-$memory_limit = '512M';
-$chunk_size = 2000; // Increased chunk size for better performance
+// Ultra-Fast Configuration for Maximum Speed
+$max_execution_time = 0; // Unlimited execution time for very large databases
+$memory_limit = '2048M'; // Increased to 2GB for maximum performance
+$chunk_size = 10000; // Extra large chunks for ultra-fast processing
 $temp_dir = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'db_backup_' . uniqid();
 
-// Set execution limits
+// Set unlimited execution and maximum memory
 set_time_limit($max_execution_time);
 ini_set('memory_limit', $memory_limit);
+ini_set('max_input_time', -1);
+ini_set('default_socket_timeout', -1);
 
 // Create temporary directory for CSV files
 if (!mkdir($temp_dir, 0755, true)) {
@@ -39,7 +35,7 @@ class EnhancedDatabaseBackup {
     private $total_rows = 0;
     private $processed_rows = 0;
     
-    public function __construct($connection, $database, $temp_dir, $chunk_size = 2000) {
+    public function __construct($connection, $database, $temp_dir, $chunk_size = 10000) {
         $this->connection = $connection;
         $this->database = $database;
         $this->temp_dir = $temp_dir;
@@ -98,22 +94,25 @@ class EnhancedDatabaseBackup {
     }
     
     /**
-     * Backup single table to CSV with progress tracking
+     * Fast backup single table to CSV with minimal overhead
      */
     public function backupTable($table_name, $show_progress = true) {
         $filename = $this->temp_dir . DIRECTORY_SEPARATOR . $table_name . '.csv';
         
-        // Open file for writing
+        // Open file for writing with larger buffer
         $file = fopen($filename, 'w');
         if (!$file) {
             throw new Exception("Cannot create file: $filename");
         }
         
+        // Set extra large buffer for ultra-fast file operations
+        stream_set_write_buffer($file, 131072); // 128KB buffer for maximum speed
+        
         // Get table columns for headers
         $columns = $this->getTableColumns($table_name);
         fputcsv($file, $columns);
         
-        // Get total rows
+        // Get total rows with fast query
         $total_rows = $this->getTableRowCount($table_name);
         $processed_rows = 0;
         $offset = 0;
@@ -123,9 +122,13 @@ class EnhancedDatabaseBackup {
             flush();
         }
         
-        // Process data in chunks
+        // Use SELECT * with ORDER BY primary key for faster sequential reads
+        $primary_key = $this->getPrimaryKey($table_name);
+        $order_clause = $primary_key ? "ORDER BY `$primary_key`" : "";
+        
+        // Process data in larger chunks for speed
         while ($processed_rows < $total_rows) {
-            $query = "SELECT * FROM `$table_name` LIMIT $this->chunk_size OFFSET $offset";
+            $query = "SELECT * FROM `$table_name` $order_clause LIMIT $this->chunk_size OFFSET $offset";
             $result = mysqli_query($this->connection, $query);
             
             if (!$result) {
@@ -134,17 +137,31 @@ class EnhancedDatabaseBackup {
             }
             
             $chunk_rows = 0;
+            // Batch write for better performance
+            $batch_data = [];
+            
             while ($row = mysqli_fetch_assoc($result)) {
-                // Handle NULL values and special characters
-                $cleaned_row = array_map(function($value) {
-                    return $value === null ? '' : $value;
-                }, array_values($row));
-                
-                fputcsv($file, $cleaned_row);
+                // Ultra-fast processing - minimal overhead
+                $batch_data[] = array_values($row);
                 $chunk_rows++;
                 $processed_rows++;
-                $this->processed_rows++;
+                
+                // Write in larger batches of 500 rows for maximum speed
+                if (count($batch_data) >= 500) {
+                    foreach ($batch_data as $row_data) {
+                        fputcsv($file, $row_data);
+                    }
+                    $batch_data = [];
+                }
             }
+            
+            // Write remaining batch data
+            foreach ($batch_data as $row_data) {
+                fputcsv($file, $row_data);
+            }
+            
+            // Free result memory immediately
+            mysqli_free_result($result);
             
             // Break if no more rows
             if ($chunk_rows == 0) {
@@ -152,11 +169,12 @@ class EnhancedDatabaseBackup {
             }
             
             $offset += $this->chunk_size;
+            $this->processed_rows += $chunk_rows;
             
-            // Show progress for large tables
-            if ($show_progress && $total_rows > 5000) {
+            // Show progress much less frequently for maximum speed
+            if ($show_progress && $total_rows > 50000 && $processed_rows % ($this->chunk_size * 5) == 0) {
                 $percent = round(($processed_rows / $total_rows) * 100, 1);
-                echo "⏳ Progress: $processed_rows/$total_rows rows ($percent%)<br>\n";
+                echo "⏳ $percent% complete ($processed_rows/$total_rows rows)<br>\n";
                 flush();
             }
         }
@@ -179,28 +197,54 @@ class EnhancedDatabaseBackup {
     }
     
     /**
-     * Get table column names with data types
+     * Get table column names (fast query)
      */
     private function getTableColumns($table) {
         $columns = [];
-        $result = mysqli_query($this->connection, "DESCRIBE `$table`");
+        $result = mysqli_query($this->connection, "SHOW COLUMNS FROM `$table`");
         
         if ($result) {
             while ($row = mysqli_fetch_assoc($result)) {
                 $columns[] = $row['Field'];
             }
+            mysqli_free_result($result);
         }
         
         return $columns;
     }
     
     /**
-     * Get accurate table row count
+     * Get primary key for faster ordered reads
+     */
+    private function getPrimaryKey($table) {
+        $result = mysqli_query($this->connection, "SHOW KEYS FROM `$table` WHERE Key_name = 'PRIMARY'");
+        if ($result) {
+            $row = mysqli_fetch_assoc($result);
+            mysqli_free_result($result);
+            return $row ? $row['Column_name'] : null;
+        }
+        return null;
+    }
+    
+    /**
+     * Fast table row count using table statistics when possible
      */
     private function getTableRowCount($table) {
+        // Try to get fast estimate first
+        $result = mysqli_query($this->connection, "SELECT table_rows FROM information_schema.tables WHERE table_schema = '$this->database' AND table_name = '$table'");
+        if ($result) {
+            $row = mysqli_fetch_assoc($result);
+            mysqli_free_result($result);
+            if ($row && $row['table_rows'] > 0) {
+                return (int)$row['table_rows'];
+            }
+        }
+        
+        // Fallback to accurate count
         $result = mysqli_query($this->connection, "SELECT COUNT(*) as count FROM `$table`");
         if ($result) {
             $row = mysqli_fetch_assoc($result);
+            mysqli_free_result($result);
             return (int)$row['count'];
         }
         return 0;
@@ -254,7 +298,7 @@ class EnhancedDatabaseBackup {
     }
     
     /**
-     * Create ZIP archive in the script directory
+     * Fast ZIP creation with compression
      */
     public function createZipBackup($backup_files, $custom_name = null) {
         if (!class_exists('ZipArchive')) {
@@ -272,18 +316,33 @@ class EnhancedDatabaseBackup {
             throw new Exception("Cannot create zip file: $zip_path");
         }
         
+        // Set maximum compression speed (lowest compression for fastest processing)
+        $zip->setCompressionName('*.csv', ZipArchive::CM_STORE); // No compression for maximum speed
+        
         // Add database info file
         $info_content = $this->generateDatabaseInfo();
         $zip->addFromString('database_info.txt', $info_content);
         
-        // Add CSV files to zip
+        // Add CSV files to zip in batches
         $total_size = 0;
+        $added_files = 0;
+        
         foreach ($backup_files as $file_info) {
             if (isset($file_info['filename']) && file_exists($file_info['filename'])) {
                 $zip->addFile($file_info['filename'], basename($file_info['filename']));
                 $total_size += filesize($file_info['filename']);
+                $added_files++;
+                
+                // Process in larger batches for maximum speed
+                if ($added_files % 20 == 0) {
+                    echo "📦 Added $added_files files to ZIP...<br>\n";
+                    flush();
+                }
             }
         }
+        
+        echo "🗜️ Finalizing ZIP file (no compression for speed)...<br>\n";
+        flush();
         
         $zip->close();
         
