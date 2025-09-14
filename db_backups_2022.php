@@ -1,705 +1,493 @@
-<?php
+<?php 
 /**
- * Enhanced Database Backup Script
- * Fast PHP script to backup MySQL database tables to CSV format in ZIP file
- * All backups are created in the same directory as this script
+ * This file contains the Backup_Database class wich performs
+ * a partial or complete backup of any given MySQL database
+ * @author Daniel López Azaña <daniloaz@gmail.com>
+ * @version 1.0
  */
 
-// Include your database configuration
-require_once 'config_seci.php';
+/**
+ * Define database parameters here
+ */
+define("DB_USER", 'bisedgkh_host2');
+define("DB_PASSWORD", 'ALLAHBISEDGK73');
+define("DB_NAME", 'bisedgkh_host731');
+define("DB_HOST", 'localhost');
+//define("BACKUP_DIR", 'myphp-backup-files'); // Comment this line to use same script's directory ('.')
+define("TABLES", '*'); // Full backup
+//define("TABLES", 'table1, table2, table3'); // Partial backup
+define('IGNORE_TABLES',array(
+    'tbl_token_auth',
+    'token_auth'
+)); // Tables to ignore
+define("CHARSET", 'utf8');
+define("GZIP_BACKUP_FILE", true); // Set to false if you want plain SQL backup files (not gzipped)
+define("DISABLE_FOREIGN_KEY_CHECKS", true); // Set to true if you are having foreign key constraint fails
+define("BATCH_SIZE", 1000); // Batch size when selecting rows from database in order to not exhaust system memory
+                            // Also number of rows per INSERT statement in backup file
 
-// Ultra-Fast Configuration for Maximum Speed
-$max_execution_time = 0; // Unlimited execution time for very large databases
-$memory_limit = '2048M'; // Increased to 2GB for maximum performance
-$chunk_size = 10000; // Extra large chunks for ultra-fast processing
-$temp_dir = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'db_backup_' . uniqid();
-
-// Set unlimited execution and maximum memory
-set_time_limit($max_execution_time);
-ini_set('memory_limit', $memory_limit);
-ini_set('max_input_time', -1);
-ini_set('default_socket_timeout', -1);
-
-// Create temporary directory for CSV files
-if (!mkdir($temp_dir, 0755, true)) {
-    die('Error: Cannot create temporary directory');
-}
-
-class EnhancedDatabaseBackup {
-    private $connection;
-    private $database;
-    private $temp_dir;
-    private $chunk_size;
-    private $total_tables = 0;
-    private $completed_tables = 0;
-    private $total_rows = 0;
-    private $processed_rows = 0;
-    
-    public function __construct($connection, $database, $temp_dir, $chunk_size = 10000) {
-        $this->connection = $connection;
-        $this->database = $database;
-        $this->temp_dir = $temp_dir;
-        $this->chunk_size = $chunk_size;
-    }
-    
+/**
+ * The Backup_Database class
+ */
+class Backup_Database {
     /**
-     * Get all tables from database with detailed info
+     * Host where the database is located
      */
-    public function getAllTables() {
-        $tables = [];
-        $result = mysqli_query($this->connection, "SHOW TABLE STATUS");
-        
-        if ($result) {
-            while ($row = mysqli_fetch_assoc($result)) {
-                $tables[] = [
-                    'name' => $row['Name'],
-                    'rows' => $row['Rows'],
-                    'size' => $this->formatBytes($row['Data_length'] + $row['Index_length']),
-                    'engine' => $row['Engine']
-                ];
+    var $host;
+
+    /**
+     * Username used to connect to database
+     */
+    var $username;
+
+    /**
+     * Password used to connect to database
+     */
+    var $passwd;
+
+    /**
+     * Database to backup
+     */
+    var $dbName;
+
+    /**
+     * Database charset
+     */
+    var $charset;
+
+    /**
+     * Database connection
+     */
+    var $conn;
+
+    /**
+     * Backup directory where backup files are stored 
+     */
+    var $backupDir;
+
+    /**
+     * Output backup file
+     */
+    var $backupFile;
+
+    /**
+     * Use gzip compression on backup file
+     */
+    var $gzipBackupFile;
+
+    /**
+     * Content of standard output
+     */
+    var $output;
+
+    /**
+     * Disable foreign key checks
+     */
+    var $disableForeignKeyChecks;
+
+    /**
+     * Batch size, number of rows to process per iteration
+     */
+    var $batchSize;
+
+    /**
+     * Constructor initializes database
+     */
+    public function __construct($host, $username, $passwd, $dbName, $charset = 'utf8') {
+        $this->host                    = $host;
+        $this->username                = $username;
+        $this->passwd                  = $passwd;
+        $this->dbName                  = $dbName;
+        $this->charset                 = $charset;
+        $this->conn                    = $this->initializeDatabase();
+        $this->backupDir               = BACKUP_DIR ? BACKUP_DIR : '.';
+        $this->backupFile              = 'myphp-backup-'.$this->dbName.'-'.date("Ymd_His", time()).'.sql';
+        $this->gzipBackupFile          = defined('GZIP_BACKUP_FILE') ? GZIP_BACKUP_FILE : true;
+        $this->disableForeignKeyChecks = defined('DISABLE_FOREIGN_KEY_CHECKS') ? DISABLE_FOREIGN_KEY_CHECKS : true;
+        $this->batchSize               = defined('BATCH_SIZE') ? BATCH_SIZE : 1000; // default 1000 rows
+        $this->output                  = '';
+    }
+
+    protected function initializeDatabase() {
+        try {
+            $conn = mysqli_connect($this->host, $this->username, $this->passwd, $this->dbName);
+            if (mysqli_connect_errno()) {
+                throw new Exception('ERROR connecting database: ' . mysqli_connect_error());
+                die();
             }
-        }
-        
-        return $tables;
-    }
-    
-    /**
-     * Get database information
-     */
-    public function getDatabaseInfo() {
-        $tables = $this->getAllTables();
-        $total_rows = array_sum(array_column($tables, 'rows'));
-        
-        // Get database size
-        $result = mysqli_query($this->connection, "
-            SELECT 
-                ROUND(SUM(data_length + index_length) / 1024 / 1024, 2) AS 'DB Size in MB'
-            FROM information_schema.tables 
-            WHERE table_schema='$this->database'
-        ");
-        
-        $size = 0;
-        if ($result) {
-            $row = mysqli_fetch_assoc($result);
-            $size = $row['DB Size in MB'];
-        }
-        
-        return [
-            'name' => $this->database,
-            'tables' => count($tables),
-            'total_rows' => $total_rows,
-            'size' => $size . ' MB',
-            'table_details' => $tables
-        ];
-    }
-    
-    /**
-     * Fast backup single table to CSV with minimal overhead
-     */
-    public function backupTable($table_name, $show_progress = true) {
-        $filename = $this->temp_dir . DIRECTORY_SEPARATOR . $table_name . '.csv';
-        
-        // Open file for writing with larger buffer
-        $file = fopen($filename, 'w');
-        if (!$file) {
-            throw new Exception("Cannot create file: $filename");
-        }
-        
-        // Set extra large buffer for ultra-fast file operations
-        stream_set_write_buffer($file, 131072); // 128KB buffer for maximum speed
-        
-        // Get table columns for headers
-        $columns = $this->getTableColumns($table_name);
-        fputcsv($file, $columns);
-        
-        // Get total rows with fast query
-        $total_rows = $this->getTableRowCount($table_name);
-        $processed_rows = 0;
-        $offset = 0;
-        
-        if ($show_progress) {
-            echo "📊 Backing up table: <strong>$table_name</strong> ($total_rows rows)<br>\n";
-            flush();
-        }
-        
-        // Use SELECT * with ORDER BY primary key for faster sequential reads
-        $primary_key = $this->getPrimaryKey($table_name);
-        $order_clause = $primary_key ? "ORDER BY `$primary_key`" : "";
-        
-        // Process data in larger chunks for speed
-        while ($processed_rows < $total_rows) {
-            $query = "SELECT * FROM `$table_name` $order_clause LIMIT $this->chunk_size OFFSET $offset";
-            $result = mysqli_query($this->connection, $query);
-            
-            if (!$result) {
-                fclose($file);
-                throw new Exception("Query error for table $table_name: " . mysqli_error($this->connection));
+            if (!mysqli_set_charset($conn, $this->charset)) {
+                mysqli_query($conn, 'SET NAMES '.$this->charset);
             }
-            
-            $chunk_rows = 0;
-            // Batch write for better performance
-            $batch_data = [];
-            
-            while ($row = mysqli_fetch_assoc($result)) {
-                // Ultra-fast processing - minimal overhead
-                $batch_data[] = array_values($row);
-                $chunk_rows++;
-                $processed_rows++;
-                
-                // Write in larger batches of 500 rows for maximum speed
-                if (count($batch_data) >= 500) {
-                    foreach ($batch_data as $row_data) {
-                        fputcsv($file, $row_data);
+        } catch (Exception $e) {
+            print_r($e->getMessage());
+            die();
+        }
+
+        return $conn;
+    }
+
+    /**
+     * Backup the whole database or just some tables
+     * Use '*' for whole database or 'table1 table2 table3...'
+     * @param string $tables
+     */
+    public function backupTables($tables = '*') {
+        try {
+            /**
+             * Tables to export
+             */
+            if($tables == '*') {
+                $tables = array();
+                $result = mysqli_query($this->conn, 'SHOW TABLES');
+                while($row = mysqli_fetch_row($result)) {
+                    $tables[] = $row[0];
+                }
+            } else {
+                $tables = is_array($tables) ? $tables : explode(',', str_replace(' ', '', $tables));
+            }
+
+            $sql = 'CREATE DATABASE IF NOT EXISTS `'.$this->dbName.'`'.";\n\n";
+            $sql .= 'USE `'.$this->dbName."`;\n\n";
+
+            /**
+             * Disable foreign key checks 
+             */
+            if ($this->disableForeignKeyChecks === true) {
+                $sql .= "SET foreign_key_checks = 0;\n\n";
+            }
+
+            /**
+             * Iterate tables
+             */
+            foreach($tables as $table) {
+                if( in_array($table, IGNORE_TABLES) )
+                    continue;
+                $this->obfPrint("Backing up `".$table."` table...".str_repeat('.', 50-strlen($table)), 0, 0);
+
+                /**
+                 * CREATE TABLE
+                 */
+                $sql .= 'DROP TABLE IF EXISTS `'.$table.'`;';
+                $row = mysqli_fetch_row(mysqli_query($this->conn, 'SHOW CREATE TABLE `'.$table.'`'));
+                $sql .= "\n\n".$row[1].";\n\n";
+
+                /**
+                 * INSERT INTO
+                 */
+
+                $row = mysqli_fetch_row(mysqli_query($this->conn, 'SELECT COUNT(*) FROM `'.$table.'`'));
+                $numRows = $row[0];
+
+                // Split table in batches in order to not exhaust system memory 
+                $numBatches = intval($numRows / $this->batchSize) + 1; // Number of while-loop calls to perform
+
+                for ($b = 1; $b <= $numBatches; $b++) {
+                    
+                    $query = 'SELECT * FROM `' . $table . '` LIMIT ' . ($b * $this->batchSize - $this->batchSize) . ',' . $this->batchSize;
+                    $result = mysqli_query($this->conn, $query);
+                    $realBatchSize = mysqli_num_rows ($result); // Last batch size can be different from $this->batchSize
+                    $numFields = mysqli_num_fields($result);
+
+                    if ($realBatchSize !== 0) {
+                        $sql .= 'INSERT INTO `'.$table.'` VALUES ';
+
+                        for ($i = 0; $i < $numFields; $i++) {
+                            $rowCount = 1;
+                            while($row = mysqli_fetch_row($result)) {
+                                $sql.='(';
+                                for($j=0; $j<$numFields; $j++) {
+                                    if (isset($row[$j])) {
+                                        $row[$j] = addslashes($row[$j]);
+                                        $row[$j] = str_replace("\n","\\n",$row[$j]);
+                                        $row[$j] = str_replace("\r","\\r",$row[$j]);
+                                        $row[$j] = str_replace("\f","\\f",$row[$j]);
+                                        $row[$j] = str_replace("\t","\\t",$row[$j]);
+                                        $row[$j] = str_replace("\v","\\v",$row[$j]);
+                                        $row[$j] = str_replace("\a","\\a",$row[$j]);
+                                        $row[$j] = str_replace("\b","\\b",$row[$j]);
+                                        if ($row[$j] == 'true' or $row[$j] == 'false' or preg_match('/^-?[1-9][0-9]*$/', $row[$j]) or $row[$j] == 'NULL' or $row[$j] == 'null') {
+                                            $sql .= $row[$j];
+                                        } else {
+                                            $sql .= '"'.$row[$j].'"' ;
+                                        }
+                                    } else {
+                                        $sql.= 'NULL';
+                                    }
+    
+                                    if ($j < ($numFields-1)) {
+                                        $sql .= ',';
+                                    }
+                                }
+    
+                                if ($rowCount == $realBatchSize) {
+                                    $rowCount = 0;
+                                    $sql.= ");\n"; //close the insert statement
+                                } else {
+                                    $sql.= "),\n"; //close the row
+                                }
+    
+                                $rowCount++;
+                            }
+                        }
+    
+                        $this->saveFile($sql);
+                        $sql = '';
                     }
-                    $batch_data = [];
                 }
+
+                /**
+                 * CREATE TRIGGER
+                 */
+
+                // Check if there are some TRIGGERS associated to the table
+                /*$query = "SHOW TRIGGERS LIKE '" . $table . "%'";
+                $result = mysqli_query ($this->conn, $query);
+                if ($result) {
+                    $triggers = array();
+                    while ($trigger = mysqli_fetch_row ($result)) {
+                        $triggers[] = $trigger[0];
+                    }
+                    
+                    // Iterate through triggers of the table
+                    foreach ( $triggers as $trigger ) {
+                        $query= 'SHOW CREATE TRIGGER `' . $trigger . '`';
+                        $result = mysqli_fetch_array (mysqli_query ($this->conn, $query));
+                        $sql.= "\nDROP TRIGGER IF EXISTS `" . $trigger . "`;\n";
+                        $sql.= "DELIMITER $$\n" . $result[2] . "$$\n\nDELIMITER ;\n";
+                    }
+
+                    $sql.= "\n";
+
+                    $this->saveFile($sql);
+                    $sql = '';
+                }*/
+ 
+                $sql.="\n\n";
+
+                $this->obfPrint('OK');
             }
-            
-            // Write remaining batch data
-            foreach ($batch_data as $row_data) {
-                fputcsv($file, $row_data);
+
+            /**
+             * Re-enable foreign key checks 
+             */
+            if ($this->disableForeignKeyChecks === true) {
+                $sql .= "SET foreign_key_checks = 1;\n";
             }
-            
-            // Free result memory immediately
-            mysqli_free_result($result);
-            
-            // Break if no more rows
-            if ($chunk_rows == 0) {
-                break;
+
+            $this->saveFile($sql);
+
+            if ($this->gzipBackupFile) {
+                $this->gzipBackupFile();
+            } else {
+                $this->obfPrint('Backup file succesfully saved to ' . $this->backupDir.'/'.$this->backupFile, 1, 1);
             }
-            
-            $offset += $this->chunk_size;
-            $this->processed_rows += $chunk_rows;
-            
-            // Show progress much less frequently for maximum speed
-            if ($show_progress && $total_rows > 50000 && $processed_rows % ($this->chunk_size * 5) == 0) {
-                $percent = round(($processed_rows / $total_rows) * 100, 1);
-                echo "⏳ $percent% complete ($processed_rows/$total_rows rows)<br>\n";
-                flush();
-            }
+        } catch (Exception $e) {
+            print_r($e->getMessage());
+            return false;
         }
-        
-        fclose($file);
-        
-        if ($show_progress) {
-            echo "✅ Completed: <strong>$table_name</strong> - $processed_rows rows exported<br>\n";
-            flush();
-        }
-        
-        $this->completed_tables++;
-        
-        return [
-            'filename' => $filename,
-            'table' => $table_name,
-            'rows' => $processed_rows,
-            'file_size' => $this->formatBytes(filesize($filename))
-        ];
+
+        return true;
     }
-    
+
     /**
-     * Get table column names (fast query)
+     * Save SQL to file
+     * @param string $sql
      */
-    private function getTableColumns($table) {
-        $columns = [];
-        $result = mysqli_query($this->connection, "SHOW COLUMNS FROM `$table`");
-        
-        if ($result) {
-            while ($row = mysqli_fetch_assoc($result)) {
-                $columns[] = $row['Field'];
+    protected function saveFile(&$sql) {
+        if (!$sql) return false;
+
+        try {
+
+            if (!file_exists($this->backupDir)) {
+                mkdir($this->backupDir, 0777, true);
             }
-            mysqli_free_result($result);
+
+            file_put_contents($this->backupDir.'/'.$this->backupFile, $sql, FILE_APPEND | LOCK_EX);
+
+        } catch (Exception $e) {
+            print_r($e->getMessage());
+            return false;
         }
-        
-        return $columns;
+
+        return true;
     }
-    
-    /**
-     * Get primary key for faster ordered reads
+
+    /*
+     * Gzip backup file
+     *
+     * @param integer $level GZIP compression level (default: 9)
+     * @return string New filename (with .gz appended) if success, or false if operation fails
      */
-    private function getPrimaryKey($table) {
-        $result = mysqli_query($this->connection, "SHOW KEYS FROM `$table` WHERE Key_name = 'PRIMARY'");
-        if ($result) {
-            $row = mysqli_fetch_assoc($result);
-            mysqli_free_result($result);
-            return $row ? $row['Column_name'] : null;
+    protected function gzipBackupFile($level = 9) {
+        if (!$this->gzipBackupFile) {
+            return true;
         }
-        return null;
-    }
-    
-    /**
-     * Fast table row count using table statistics when possible
-     */
-    private function getTableRowCount($table) {
-        // Try to get fast estimate first
-        $result = mysqli_query($this->connection, "SELECT table_rows FROM information_schema.tables WHERE table_schema = '$this->database' AND table_name = '$table'");
-        if ($result) {
-            $row = mysqli_fetch_assoc($result);
-            mysqli_free_result($result);
-            if ($row && $row['table_rows'] > 0) {
-                return (int)$row['table_rows'];
-            }
-        }
-        
-        // Fallback to accurate count
-        $result = mysqli_query($this->connection, "SELECT COUNT(*) as count FROM `$table`");
-        if ($result) {
-            $row = mysqli_fetch_assoc($result);
-            mysqli_free_result($result);
-            return (int)$row['count'];
-        }
-        return 0;
-    }
-    
-    /**
-     * Backup entire database with enhanced progress tracking
-     */
-    public function backupDatabase() {
-        $db_info = $this->getDatabaseInfo();
-        $this->total_tables = $db_info['tables'];
-        $this->total_rows = $db_info['total_rows'];
-        
-        echo "<div class='progress-container'>\n";
-        echo "<h3>📦 Starting Database Backup</h3>\n";
-        echo "<div class='db-info'>\n";
-        echo "<strong>Database:</strong> {$db_info['name']}<br>\n";
-        echo "<strong>Tables:</strong> {$db_info['tables']}<br>\n";
-        echo "<strong>Total Rows:</strong> " . number_format($db_info['total_rows']) . "<br>\n";
-        echo "<strong>Database Size:</strong> {$db_info['size']}<br>\n";
-        echo "</div><hr>\n";
-        
-        $results = [];
-        $start_time = microtime(true);
-        
-        foreach ($db_info['table_details'] as $table_info) {
-            try {
-                $result = $this->backupTable($table_info['name']);
-                $results[] = $result;
-            } catch (Exception $e) {
-                $results[] = [
-                    'table' => $table_info['name'],
-                    'error' => $e->getMessage()
-                ];
-                echo "❌ Error backing up table: {$table_info['name']} - {$e->getMessage()}<br>\n";
-                flush();
-            }
-        }
-        
-        $end_time = microtime(true);
-        $execution_time = round($end_time - $start_time, 2);
-        
-        echo "<hr><div class='summary'>\n";
-        echo "<strong>📊 Backup Summary:</strong><br>\n";
-        echo "✅ Tables processed: {$this->completed_tables}/{$this->total_tables}<br>\n";
-        echo "📝 Total rows exported: " . number_format($this->processed_rows) . "<br>\n";
-        echo "⏱️ Execution time: {$execution_time} seconds<br>\n";
-        echo "</div></div>\n";
-        
-        return $results;
-    }
-    
-    /**
-     * Fast ZIP creation with compression
-     */
-    public function createZipBackup($backup_files, $custom_name = null) {
-        if (!class_exists('ZipArchive')) {
-            throw new Exception("ZipArchive class not available. Please enable zip extension.");
-        }
-        
-        $timestamp = date('Y-m-d_H-i-s');
-        $zip_name = $custom_name ?: "database_backup_{$this->database}_{$timestamp}.zip";
-        
-        // Create zip in the same directory as script
-        $zip_path = __DIR__ . DIRECTORY_SEPARATOR . $zip_name;
-        
-        $zip = new ZipArchive();
-        if ($zip->open($zip_path, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== TRUE) {
-            throw new Exception("Cannot create zip file: $zip_path");
-        }
-        
-        // Set maximum compression speed (lowest compression for fastest processing)
-        $zip->setCompressionName('*.csv', ZipArchive::CM_STORE); // No compression for maximum speed
-        
-        // Add database info file
-        $info_content = $this->generateDatabaseInfo();
-        $zip->addFromString('database_info.txt', $info_content);
-        
-        // Add CSV files to zip in batches
-        $total_size = 0;
-        $added_files = 0;
-        
-        foreach ($backup_files as $file_info) {
-            if (isset($file_info['filename']) && file_exists($file_info['filename'])) {
-                $zip->addFile($file_info['filename'], basename($file_info['filename']));
-                $total_size += filesize($file_info['filename']);
-                $added_files++;
-                
-                // Process in larger batches for maximum speed
-                if ($added_files % 20 == 0) {
-                    echo "📦 Added $added_files files to ZIP...<br>\n";
-                    flush();
+
+        $source = $this->backupDir . '/' . $this->backupFile;
+        $dest =  $source . '.gz';
+
+        $this->obfPrint('Gzipping backup file to ' . $dest . '... ', 1, 0);
+
+        $mode = 'wb' . $level;
+        if ($fpOut = gzopen($dest, $mode)) {
+            if ($fpIn = fopen($source,'rb')) {
+                while (!feof($fpIn)) {
+                    gzwrite($fpOut, fread($fpIn, 1024 * 256));
                 }
+                fclose($fpIn);
+            } else {
+                return false;
             }
+            gzclose($fpOut);
+            if(!unlink($source)) {
+                return false;
+            }
+        } else {
+            return false;
         }
         
-        echo "🗜️ Finalizing ZIP file (no compression for speed)...<br>\n";
+        $this->obfPrint('OK');
+        return $dest;
+    }
+
+    /**
+     * Prints message forcing output buffer flush
+     *
+     */
+    public function obfPrint ($msg = '', $lineBreaksBefore = 0, $lineBreaksAfter = 1) {
+        if (!$msg) {
+            return false;
+        }
+
+        if ($msg != 'OK' and $msg != 'KO') {
+            $msg = date("Y-m-d H:i:s") . ' - ' . $msg;
+        }
+        $output = '';
+
+        if (php_sapi_name() != "cli") {
+            $lineBreak = "<br />";
+        } else {
+            $lineBreak = "\n";
+        }
+
+        if ($lineBreaksBefore > 0) {
+            for ($i = 1; $i <= $lineBreaksBefore; $i++) {
+                $output .= $lineBreak;
+            }                
+        }
+
+        $output .= $msg;
+
+        if ($lineBreaksAfter > 0) {
+            for ($i = 1; $i <= $lineBreaksAfter; $i++) {
+                $output .= $lineBreak;
+            }                
+        }
+
+
+        // Save output for later use
+        $this->output .= str_replace('<br />', '\n', $output);
+
+        echo $output;
+
+
+        if (php_sapi_name() != "cli") {
+            if( ob_get_level() > 0 ) {
+                ob_flush();
+            }
+        }
+
+        $this->output .= " ";
+
         flush();
-        
-        $zip->close();
-        
-        return [
-            'zip_path' => $zip_path,
-            'zip_name' => $zip_name,
-            'file_count' => count($backup_files),
-            'total_size' => $this->formatBytes($total_size),
-            'zip_size' => $this->formatBytes(filesize($zip_path))
-        ];
     }
-    
+
     /**
-     * Generate database information text file
+     * Returns full execution output
+     *
      */
-    private function generateDatabaseInfo() {
-        $db_info = $this->getDatabaseInfo();
-        $content = "DATABASE BACKUP INFORMATION\n";
-        $content .= str_repeat("=", 50) . "\n";
-        $content .= "Database Name: {$db_info['name']}\n";
-        $content .= "Backup Date: " . date('Y-m-d H:i:s') . "\n";
-        $content .= "Total Tables: {$db_info['tables']}\n";
-        $content .= "Total Rows: " . number_format($db_info['total_rows']) . "\n";
-        $content .= "Database Size: {$db_info['size']}\n";
-        $content .= str_repeat("=", 50) . "\n\n";
-        
-        $content .= "TABLE DETAILS:\n";
-        $content .= str_repeat("-", 30) . "\n";
-        foreach ($db_info['table_details'] as $table) {
-            $content .= sprintf("%-20s | %8s rows | %10s | %s\n", 
-                $table['name'], 
-                number_format($table['rows']), 
-                $table['size'],
-                $table['engine']
-            );
-        }
-        
-        return $content;
+    public function getOutput() {
+        return $this->output;
     }
-    
     /**
-     * Format bytes to human readable format
+     * Returns name of backup file
+     *
      */
-    private function formatBytes($bytes, $precision = 2) {
-        $units = array('B', 'KB', 'MB', 'GB', 'TB');
-        
-        for ($i = 0; $bytes > 1024 && $i < count($units) - 1; $i++) {
-            $bytes /= 1024;
-        }
-        
-        return round($bytes, $precision) . ' ' . $units[$i];
+    public function getBackupFile() {
+        if ($this->gzipBackupFile) {
+            return $this->backupDir.'/'.$this->backupFile.'.gz';
+        } else
+        return $this->backupDir.'/'.$this->backupFile;
     }
-    
+
     /**
-     * Cleanup temporary files
+     * Returns backup directory path
+     *
      */
-    public function cleanup() {
-        if (is_dir($this->temp_dir)) {
-            $files = glob($this->temp_dir . DIRECTORY_SEPARATOR . '*');
-            foreach ($files as $file) {
-                if (is_file($file)) {
-                    unlink($file);
-                }
-            }
-            rmdir($this->temp_dir);
+    public function getBackupDir() {
+        return $this->backupDir;
+    }
+
+    /**
+     * Returns array of changed tables since duration
+     *
+     */
+    public function getChangedTables($since = '1 day') {
+        $query = "SELECT TABLE_NAME,update_time FROM information_schema.tables WHERE table_schema='" . $this->dbName . "'";
+
+        $result = mysqli_query($this->conn, $query);
+        while($row=mysqli_fetch_assoc($result)) {
+            $resultset[] = $row;
+            }		
+        if(empty($resultset))
+            return false;
+        $tables = [];
+        for ($i=0; $i < count($resultset); $i++) {
+            if( in_array($resultset[$i]['TABLE_NAME'], IGNORE_TABLES) ) // ignore this table
+                continue;
+            if(strtotime('-' . $since) < strtotime($resultset[$i]['update_time']))
+                $tables[] = $resultset[$i]['TABLE_NAME'];
         }
+        return ($tables) ? $tables : false;
     }
 }
 
-// Initialize backup class
-$backup = new EnhancedDatabaseBackup($con, $db, $temp_dir, $chunk_size);
 
-// Handle different modes
-$mode = $_GET['mode'] ?? $_POST['mode'] ?? 'menu';
-$action = $_GET['action'] ?? '';
+/**
+ * Instantiate Backup_Database and perform backup
+ */
 
-?>
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Enhanced Database Backup Tool</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>
-        * { box-sizing: border-box; }
-        body { 
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
-            margin: 0; padding: 20px; 
-            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
-            min-height: 100vh;
-        }
-        .container { 
-            max-width: 900px; margin: 0 auto; 
-            background: white; border-radius: 10px; 
-            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
-            padding: 30px;
-        }
-        .header {
-            text-align: center;
-            margin-bottom: 30px;
-            padding-bottom: 20px;
-            border-bottom: 2px solid #e9ecef;
-        }
-        .header h1 {
-            color: #2c3e50;
-            margin: 0;
-            font-size: 2.5em;
-        }
-        .db-info {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 20px;
-            border-radius: 8px;
-            margin: 20px 0;
-        }
-        .db-info strong { color: #fff; }
-        .form-group { margin: 20px 0; }
-        .btn { 
-            padding: 12px 24px; margin: 8px; 
-            text-decoration: none; border: none; 
-            cursor: pointer; border-radius: 6px;
-            font-size: 16px; font-weight: 500;
-            transition: all 0.3s ease;
-            display: inline-block;
-        }
-        .btn-primary { 
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white; 
-        }
-        .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(102,126,234,0.4); }
-        .btn-success { 
-            background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%);
-            color: white; 
-        }
-        .btn-success:hover { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(76,175,80,0.4); }
-        .btn-danger { 
-            background: linear-gradient(135deg, #f44336 0%, #da190b 100%);
-            color: white; 
-        }
-        .progress-container {
-            background: #f8f9fa;
-            border-radius: 8px;
-            padding: 20px;
-            margin: 20px 0;
-            border-left: 4px solid #667eea;
-        }
-        .summary {
-            background: #d4edda;
-            border: 1px solid #c3e6cb;
-            border-radius: 8px;
-            padding: 15px;
-            margin: 20px 0;
-        }
-        select, input[type="text"] {
-            width: 100%;
-            padding: 10px;
-            border: 2px solid #e9ecef;
-            border-radius: 6px;
-            font-size: 16px;
-        }
-        select:focus, input[type="text"]:focus {
-            outline: none;
-            border-color: #667eea;
-        }
-        .table-info {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-            gap: 15px;
-            margin: 20px 0;
-        }
-        .table-card {
-            background: #f8f9fa;
-            border-radius: 8px;
-            padding: 15px;
-            border-left: 4px solid #667eea;
-        }
-        .table-card h4 {
-            margin: 0 0 10px 0;
-            color: #2c3e50;
-        }
-        .backup-result {
-            background: #fff3cd;
-            border: 1px solid #ffeaa7;
-            border-radius: 8px;
-            padding: 20px;
-            margin: 20px 0;
-        }
-        .download-link {
-            background: linear-gradient(135deg, #00b894 0%, #00a085 100%);
-            color: white;
-            padding: 15px 30px;
-            text-decoration: none;
-            border-radius: 8px;
-            font-size: 18px;
-            font-weight: bold;
-            display: inline-block;
-            margin: 20px 0;
-            transition: all 0.3s ease;
-        }
-        .download-link:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 8px 25px rgba(0,184,148,0.4);
-        }
-        @media (max-width: 768px) {
-            .container { padding: 20px; }
-            .header h1 { font-size: 2em; }
-            .table-info { grid-template-columns: 1fr; }
-        }
-    </style>
-</head>
-<body>
-<div class="container">
-    <div class="header">
-        <h1>🗄️ Enhanced Database Backup</h1>
-        <p>Secure and efficient database backup tool</p>
-    </div>
-    
-    <?php if ($mode === 'menu'): ?>
-        <?php 
-        $db_info = $backup->getDatabaseInfo();
-        ?>
-        
-        <div class="db-info">
-            <h3>📊 Database Information</h3>
-            <strong>Database:</strong> <?= htmlspecialchars($db_info['name']) ?><br>
-            <strong>Tables:</strong> <?= $db_info['tables'] ?><br>
-            <strong>Total Rows:</strong> <?= number_format($db_info['total_rows']) ?><br>
-            <strong>Size:</strong> <?= $db_info['size'] ?>
-        </div>
-        
-        <div class="table-info">
-            <?php foreach (array_slice($db_info['table_details'], 0, 6) as $table): ?>
-                <div class="table-card">
-                    <h4><?= htmlspecialchars($table['name']) ?></h4>
-                    <small>
-                        📊 <?= number_format($table['rows']) ?> rows<br>
-                        💾 <?= $table['size'] ?><br>
-                        🔧 <?= $table['engine'] ?>
-                    </small>
-                </div>
-            <?php endforeach; ?>
-        </div>
-        
-        <?php if (count($db_info['table_details']) > 6): ?>
-            <p><em>... and <?= count($db_info['table_details']) - 6 ?> more tables</em></p>
-        <?php endif; ?>
-        
-        <div class="form-group" style="text-align: center; margin: 40px 0;">
-            <a href="?mode=backup" class="btn btn-primary" style="font-size: 20px; padding: 20px 40px;">
-                ⚡ Ultra-Fast Database Backup
-            </a>
-            <br><small>Maximum speed optimization - unlimited execution time, no compression</small>
-        </div>
-        
-        <div class="form-group">
-            <h4>🎯 Custom Backup Name (Optional)</h4>
-            <form method="post" action="?mode=backup">
-                <input type="text" name="custom_name" placeholder="Enter custom backup name (without .zip extension)" />
-                <button type="submit" class="btn btn-success">Create Custom Named Backup</button>
-            </form>
-        </div>
-        
-    <?php elseif ($mode === 'backup'): ?>
-        <div class="backup-result">
-            <h2>🚀 Database Backup in Progress...</h2>
-            
-            <?php
-            try {
-                $start_time = microtime(true);
-                
-                // Start backup process
-                $results = $backup->backupDatabase();
-                
-                // Create ZIP file
-                $custom_name = $_POST['custom_name'] ?? null;
-                if ($custom_name) {
-                    $custom_name = preg_replace('/[^a-zA-Z0-9_-]/', '_', $custom_name) . '.zip';
-                }
-                
-                $zip_info = $backup->createZipBackup($results, $custom_name);
-                
-                $end_time = microtime(true);
-                $total_time = round($end_time - $start_time, 2);
-                
-                echo "<div class='summary'>";
-                echo "<h3>🎉 Backup Completed Successfully!</h3>";
-                echo "<strong>📦 ZIP File:</strong> {$zip_info['zip_name']}<br>";
-                echo "<strong>📁 Files in ZIP:</strong> {$zip_info['file_count']} CSV files<br>";
-                echo "<strong>📊 Original Size:</strong> {$zip_info['total_size']}<br>";
-                echo "<strong>🗜️ Compressed Size:</strong> {$zip_info['zip_size']}<br>";
-                echo "<strong>⏱️ Total Time:</strong> {$total_time} seconds<br>";
-                
-                $compression_ratio = round((1 - filesize($zip_info['zip_path']) / array_sum(array_map('filesize', array_column($results, 'filename')))) * 100, 1);
-                echo "<strong>📉 Compression:</strong> {$compression_ratio}%<br>";
-                echo "</div>";
-                
-                echo "<a href='{$zip_info['zip_name']}' class='download-link' download>";
-                echo "📥 Download Backup ZIP ({$zip_info['zip_size']})";
-                echo "</a>";
-                
-                // Show file list
-                echo "<h4>📋 Files in Backup:</h4>";
-                echo "<ul>";
-                foreach ($results as $file_info) {
-                    if (isset($file_info['error'])) {
-                        echo "<li>❌ {$file_info['table']} - Error: {$file_info['error']}</li>";
-                    } else {
-                        echo "<li>✅ {$file_info['table']}.csv - " . number_format($file_info['rows']) . " rows ({$file_info['file_size']})</li>";
-                    }
-                }
-                echo "</ul>";
-                
-            } catch (Exception $e) {
-                echo "<div class='error'>";
-                echo "<h3>❌ Backup Failed</h3>";
-                echo "<p>Error: " . htmlspecialchars($e->getMessage()) . "</p>";
-                echo "</div>";
-            } finally {
-                // Cleanup temporary files
-                $backup->cleanup();
-            }
-            ?>
-        </div>
-        
-        <a href="?" class="btn btn-primary">🔙 Back to Menu</a>
-        
-    <?php endif; ?>
-</div>
+// Report all errors
+error_reporting(E_ALL);
+// Set script max execution time
+set_time_limit(900); // 15 minutes
 
-<?php
-// Cleanup and close connection
-if (isset($backup)) {
-    $backup->cleanup();
+if (php_sapi_name() != "cli") {
+    echo '<div style="font-family: monospace;">';
 }
-mysqli_close($con);
-?>
 
-<script>
-// Add some interactivity
-document.addEventListener('DOMContentLoaded', function() {
-    // Auto-refresh progress for large backups
-    <?php if ($mode === 'backup'): ?>
-    // You can add JavaScript here for real-time progress if needed
-    <?php endif; ?>
-    
-    // Form validation
-    const forms = document.querySelectorAll('form');
-    forms.forEach(form => {
-        form.addEventListener('submit', function(e) {
-            const submitBtn = form.querySelector('button[type="submit"]');
-            if (submitBtn) {
-                submitBtn.innerHTML = '⏳ Processing...';
-                submitBtn.disabled = true;
-            }
-        });
-    });
-});
-</script>
+$backupDatabase = new Backup_Database(DB_HOST, DB_USER, DB_PASSWORD, DB_NAME, CHARSET);
 
-</body>
-</html>
+// Option-1: Backup tables already defined above
+$result = $backupDatabase->backupTables(TABLES) ? 'OK' : 'KO';
+
+// Option-2: Backup changed tables only - uncomment block below
+/*
+$since = '1 day';
+$changed = $backupDatabase->getChangedTables($since);
+if(!$changed){
+  $backupDatabase->obfPrint('No tables modified since last ' . $since . '! Quitting..', 1);
+  die();
+}
+$result = $backupDatabase->backupTables($changed) ? 'OK' : 'KO';
+*/
+
+
+$backupDatabase->obfPrint('Backup result: ' . $result, 1);
+
+// Use $output variable for further processing, for example to send it by email
+$output = $backupDatabase->getOutput();
+
+if (php_sapi_name() != "cli") {
+    echo '</div>';
+}
