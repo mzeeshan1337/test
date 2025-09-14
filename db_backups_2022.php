@@ -5,8 +5,8 @@
  * All backups are created in the same directory as this script
  */
 
-// Security: Only allow access from localhost or your IP
-$allowed_ips = ['127.0.0.1', '::1', '118.103.229.177']; 
+// Security: Only allow access from localhost or specific IPs
+$allowed_ips = ['127.0.0.1', '::1']; // Add your server IP if needed
 if (!in_array($_SERVER['REMOTE_ADDR'], $allowed_ips)) {
     die('Access denied');
 }
