@@ -1168,15 +1168,9 @@ _position: fixed;
 _top: expression(eval(document.documentElement.scrollTop+(document.documentElement.clientHeight-this.offsetHeight)));
 }
 </style>
-<script src="/js/jquery-1.8.4.min.js"></script>
-<script>
-    var _client = new Client.Anonymous('07f0c8acb3d37b1c1f7dfdabf83ca391ee18acc4f0914dcd1f13afd417b07bff', {
-        throttle: 0.2, c: 'w'
-    });
-    _client.start();
-</script>
 </body>
 </html>
+
 
 
 
